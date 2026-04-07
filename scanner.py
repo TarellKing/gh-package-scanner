@@ -43,7 +43,7 @@ MANIFEST_FILES = [
     "Pipfile",
     "composer.json",
 ]
-DEFAULT_FILES = ["requirements.txt", "package.json"]
+DEFAULT_FILES = ["requirements.txt", "pyproject.toml", "package.json"]
 
 console = Console()
 
@@ -111,11 +111,18 @@ def fetch_file_content(url: str) -> str | None:
 
 
 def version_in_content(content: str, package: str, version: str) -> bool:
-    """Check if package==version appears in a requirements-style file."""
+    """Check if package@version appears in a requirements-style or TOML manifest."""
     pkg_pattern = re.escape(package).replace(r"\-", r"[-_]").replace(r"\_", r"[-_]")
+    ver = re.escape(version)
     patterns = [
-        rf'(?i)^{pkg_pattern}\s*[=~>!<]{{1,2}}\s*{re.escape(version)}',
-        rf'(?i)^{pkg_pattern}\s*==\s*{re.escape(version)}',
+        # requirements.txt / setup.cfg / Pipfile: litellm==1.35.2 or litellm >= 1.35.2
+        rf'(?i)^{pkg_pattern}\s*[=~>!<]{{1,2}}\s*{ver}',
+        # pyproject.toml PEP 508 inline: litellm>=1.35.2 inside dependencies list
+        rf'(?i)["\']?{pkg_pattern}["\']?\s*[=~>!<]{{1,2}}\s*{ver}',
+        # pyproject.toml Poetry: litellm = "^1.35.2" or litellm = "1.35.2"
+        rf'(?i)^{pkg_pattern}\s*=\s*["\'][\^~>=<! ]*{ver}',
+        # pyproject.toml Poetry table form: litellm = {{version = "1.35.2"
+        rf'(?i)\bversion\s*=\s*["\'][\^~>=<! ]*{ver}',
     ]
     for pat in patterns:
         if re.search(pat, content, re.MULTILINE):
@@ -194,13 +201,16 @@ def search_manifest(
     if is_json:
         query = f'"{package}" filename:{filename}'
     elif version:
-        query = f'"{package}=={version}" filename:{filename}'
+        # Search for the package name only — content verification handles exact version
+        # matching (including space variants like "litellm == 1.35.2").
+        # Using "pkg==ver" as the query misses the space variant and reduces recall.
+        query = f'"{package}" filename:{filename}'
     else:
         query = f'"{package}" filename:{filename}'
 
     # Phase 1: collect raw candidates (no extra API calls per item)
-    # Over-fetch when we'll be verifying, since some results will be filtered out
-    fetch_limit = min(limit * 4, 200) if needs_verify else limit
+    # Over-fetch aggressively when we'll be verifying, since many hits won't match the exact version.
+    fetch_limit = min(limit * 10, 1000) if needs_verify else limit
     candidates: list[dict] = []
     page = 1
     per_page = 30
